@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Flappy Bird Clone</title>
+    <style>
+        /* CSS STYLES */
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #333;
+            overflow: hidden; /* Prevent scrolling on mobile */
+            touch-action: none; /* Disable default touch behaviors */
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI Overlay for Score and Game States */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Let clicks pass through to canvas */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .score-display {
+            position: absolute;
+            top: 10%;
+            font-size: 4rem;
+            color: white;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000;
+            z-index: 10;
+        }
+
+        .message-box {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 20px;
+            border-radius: 10px;
+            color: white;
+        }
+
+        h1 { margin: 0 0 10px 0; font-size: 2rem; color: #FFD700; text-shadow: 2px 2px #000; }
+        p { margin: 5px 0; font-size: 1.2rem; text-shadow: 1px 1px #000; }
+        .blink { animation: blinker 1.5s linear infinite; }
+
+        @keyframes blinker {
+            50% { opacity: 0; }
+        }
+
+        #game-over-screen { display: none; }
+        #start-screen { display: block; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="score-display" id="score">0</div>
+        
+        <div id="start-screen" class="message-box">
+            <h1>FLAPPY BIRD</h1>
+            <p>Tap, Click, or Spacebar to Fly</p>
+            <p class="blink">Tap to Start</p>
+        </div>
+
+        <div id="game-over-screen" class="message-box">
+            <h1>GAME OVER</h1>
+            <p>Score: <span id="final-score">0</span></p>
+            <p class="blink">Tap to Restart</p>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // ==========================================
+        // 1. SETUP & CONSTANTS
+        // ==========================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // UI Elements
+        const scoreEl = document.getElementById('score');
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const finalScoreEl = document.getElementById('final-score');
+
+        // Game State variables
+        let frames = 0;
+        let score = 0;
+        let gameSpeed = 2; // Will be scaled based on width
+        let state = {
+            current: 0,
+            getReady: 0,
+            game: 1,
+            over: 2
+        };
+
+        // Audio Objects (Preloaded)
+        const sounds = {
+            bgm: new Audio('assets/bgm.mp3'),
+            jump: new Audio('assets/jump.mp3'),
+            death: new Audio('assets/death.mp3')
+        };
+        
+        sounds.bgm.loop = true;
+        sounds.bgm.volume = 0.5;
+
+        // Image Objects
+        const bgImg = new Image();
+        bgImg.src = 'assets/bg.png';
+
+        const birdImg = new Image();
+        birdImg.src = 'assets/bird.png';
+
+        const obstacleImg = new Image();
+        obstacleImg.src = 'assets/obstacle.png';
+
+        // Scaling Factors (responsive design)
+        let scale = 1;
+
+        // ==========================================
+        // 2. GAME OBJECTS
+        // ==========================================
+
+        const bird = {
+            x: 50,
+            y: 150,
+            width: 34,
+            height: 24,
+            velocity: 0,
+            gravity: 0.25,
+            jump: 4.6,
+            radius: 12, // Collision radius
+            rotation: 0,
+
+            draw: function() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                // Rotate bird based on velocity
+                this.rotation = Math.min(Math.PI / 4, Math.max(-Math.PI / 4, (this.velocity * 0.1))); 
+                ctx.rotate(this.rotation);
+                
+                ctx.drawImage(birdImg, -this.width/2, -this.height/2, this.width, this.height);
+                ctx.restore();
+            },
+
+            update: function() {
+                // Physics
+                this.velocity += this.gravity;
+                this.y += this.velocity;
+
+                // Floor Collision
+                if (this.y + this.height/2 >= canvas.height) {
+                    this.y = canvas.height - this.height/2;
+                    endGame();
+                }
+                
+                // Ceiling Collision (optional, usually flappy bird doesn't die on ceiling but stays there)
+                if (this.y - this.height/2 <= 0) {
+                    this.y = this.height/2;
+                    this.velocity = 0;
+                }
+            },
+
+            flap: function() {
+                this.velocity = -this.jump;
+                // Reset jump sound to allow rapid tapping
+                sounds.jump.currentTime = 0;
+                sounds.jump.play().catch(() => {}); // Catch autoplay errors
+            },
+            
+            reset: function() {
+                this.y = canvas.height / 2;
+                this.velocity = 0;
+                this.rotation = 0;
+            }
+        };
+
+        const pipes = {
+            items: [],
+            w: 52,
+            gap: 120, // Gap size
+            dx: 2,    // Moving speed
+
+            draw: function() {
+                for(let i = 0; i < this.items.length; i++) {
+                    let p = this.items[i];
+                    
+                    // Draw Top Pipe
+                    // We translate and scale to flip the obstacle image for the top pipe
+                    ctx.save();
+                    ctx.translate(p.x + this.w/2, p.y); 
+                    ctx.scale(1, -1); // Flip vertically
+                    // Draw huge height to ensure it goes off screen
+                    ctx.drawImage(obstacleImg, -this.w/2, 0, this.w, 600); 
+                    ctx.restore();
+
+                    // Draw Bottom Pipe
+                    ctx.drawImage(obstacleImg, p.x, p.y + this.gap, this.w, 600);
+                }
+            },
+
+            update: function() {
+                // Add new pipe every 120 frames (approx 2 seconds)
+                if (frames % 120 === 0) {
+                    // Calculate random y position for the gap
+                    // Keep gap within reasonable screen limits
+                    const minTop = canvas.height * 0.1;
+                    const maxTop = canvas.height - this.gap - (canvas.height * 0.1);
+                    
+                    this.items.push({
+                        x: canvas.width,
+                        y: Math.floor(Math.random() * (maxTop - minTop + 1) + minTop)
+                    });
+                }
+
+                for (let i = 0; i < this.items.length; i++) {
+                    let p = this.items[i];
+                    p.x -= this.dx;
+
+                    // Collision Detection logic
+                    // 1. Horizontal check
+                    if (bird.x + bird.width/2 > p.x && bird.x - bird.width/2 < p.x + this.w) {
+                        // 2. Vertical check (Top pipe OR Bottom pipe)
+                        if (bird.y - bird.height/2 < p.y || bird.y + bird.height/2 > p.y + this.gap) {
+                            endGame();
+                        }
+                    }
+
+                    // Update Score
+                    // Check if pipe passed the bird center
+                    if (p.x + this.w < bird.x && !p.passed) {
+                        score++;
+                        scoreEl.innerText = score;
+                        p.passed = true; // mark as passed so we don't score twice
+                    }
+
+                    // Remove off-screen pipes
+                    if (p.x + this.w <= 0) {
+                        this.items.shift();
+                        i--;
+                    }
+                }
+            },
+            
+            reset: function() {
+                this.items = [];
+            }
+        };
+
+        const background = {
+            x: 0,
+            dx: 0.5, // Moves slower than pipes for parallax effect
+            draw: function() {
+                // Draw two images side by side for infinite scrolling
+                // Draw bg to cover full height
+                ctx.drawImage(bgImg, this.x, 0, canvas.width, canvas.height);
+                ctx.drawImage(bgImg, this.x + canvas.width, 0, canvas.width, canvas.height);
+            },
+            update: function() {
+                this.x -= this.dx;
+                if (this.x <= -canvas.width) this.x = 0;
+            }
+        };
+
+        // ==========================================
+        // 3. CORE FUNCTIONS
+        // ==========================================
+
+        function init() {
+            resizeCanvas();
+            bird.reset();
+            loop();
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            // Adjust physics/size based on screen height for consistency
+            scale = Math.min(canvas.width / 320, canvas.height / 480); 
+            
+            // Cap the scale so it doesn't look ridiculous on 4k
+            if(scale > 2) scale = 2; 
+
+            // Apply basic responsive tuning
+            bird.width = 34 * scale;
+            bird.height = 24 * scale;
+            bird.gravity = 0.25 * scale;
+            bird.jump = 5.5 * scale; // Slightly stronger jump for better feel
+            
+            pipes.w = 52 * scale;
+            pipes.gap = 140 * scale; // Slightly larger gap for playability
+            pipes.dx = 2.5 * scale;
+            
+            // Position bird
+            bird.x = canvas.width * 0.2; // 20% from left
+        }
+
+        function loop() {
+            // Update
+            background.update();
+            
+            if (state.current === state.game) {
+                pipes.update();
+                bird.update();
+                frames++;
+            } else if (state.current === state.getReady) {
+                // Hover effect in menu
+                bird.y = (canvas.height / 2) + Math.cos(frames/15) * 5;
+                frames++;
+            }
+
+            // Draw
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            background.draw();
+            pipes.draw();
+            bird.draw();
+
+            requestAnimationFrame(loop);
+        }
+
+        function endGame() {
+            if(state.current === state.over) return;
+            
+            state.current = state.over;
+            sounds.bgm.pause();
+            sounds.death.play().catch(() => {});
+            
+            finalScoreEl.innerText = score;
+            gameOverScreen.style.display = 'block';
+            scoreEl.style.display = 'none';
+        }
+
+        function resetGame() {
+            bird.reset();
+            pipes.reset();
+            score = 0;
+            frames = 0;
+            scoreEl.innerText = score;
+            state.current = state.getReady;
+            
+            // UI Reset
+            gameOverScreen.style.display = 'none';
+            startScreen.style.display = 'block';
+            scoreEl.style.display = 'block';
+            
+            // Reset BGM logic (don't play yet, wait for input)
+            sounds.bgm.currentTime = 0;
+        }
+
+        function handleInput(e) {
+            // Prevent default scrolling/zooming
+            if(e.type === 'touchstart' || e.type === 'keydown') {
+                // Only prevent default for game keys to avoid blocking browser UI shortcuts
+                if (e.type === 'keydown' && (e.code === 'Space' || e.code === 'ArrowUp')) {
+                    e.preventDefault();
+                }
+            }
+
+            switch (state.current) {
+                case state.getReady:
+                    // Start Game
+                    state.current = state.game;
+                    startScreen.style.display = 'none';
+                    
+                    // Audio Logic: Mobile browsers require user interaction to start audio context
+                    sounds.bgm.play().catch((e) => console.log("Audio autoplay blocked, waiting for interaction"));
+                    bird.flap();
+                    break;
+
+                case state.game:
+                    // Flap
+                    bird.flap();
+                    break;
+
+                case state.over:
+                    // Restart
+                    // Add a small delay so they don't accidentally restart instantly after dying
+                    resetGame();
+                    break;
+            }
+        }
+
+        // ==========================================
+        // 4. EVENT LISTENERS
+        // ==========================================
+        
+        window.addEventListener('resize', resizeCanvas);
+
+        // Mouse Click
+        window.addEventListener('mousedown', handleInput);
+        
+        // Touch (Mobile)
+        window.addEventListener('touchstart', handleInput, {passive: false});
+
+        // Keyboard
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' || e.code === 'ArrowUp') {
+                handleInput(e);
+            }
+        });
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>
